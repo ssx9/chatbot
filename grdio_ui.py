@@ -120,8 +120,8 @@ class GradioUI:
 
         async with self.agent.run_stream_events(
                 prompt, deps=self.deps, message_history=past_messages
-        ) as stream:
-            async for event in stream:
+        ) as events:
+            async for event in events:
                 if isinstance(event, PartStartEvent):
                     if isinstance(event.part, TextPart):
                         message_idx = ensure_assistant_message()
