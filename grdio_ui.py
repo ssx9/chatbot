@@ -2,10 +2,22 @@ from pathlib import Path
 import json
 
 import gradio as gr
-from pydantic_ai import ToolCallPart, ToolReturnPart, ThinkingPart
 from pydantic import BaseModel
 from gradio.components.chatbot import ExampleMessage
-from pydantic_ai import Agent
+from pydantic_ai import (
+    Agent,
+    AgentRunResultEvent,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPart,
+    TextPartDelta,
+    ThinkingPart,
+    ThinkingPartDelta,
+    ToolCallPart,
+    ToolReturnPart,
+)
 
 
 class GradioUI:
@@ -91,39 +103,70 @@ class GradioUI:
         json_content = self._serialize_tool_content(call.content)
         gr_message['content'] += f'\nOutput: {json_content}'
 
-    def _process_message_part(self, call, chatbot: list[dict]):
-        if isinstance(call, ThinkingPart):
-            self._append_thinking_part(call, chatbot)
-            return
-
-        if isinstance(call, ToolCallPart):
-            self._append_tool_call_part(call, chatbot)
-            return
-
-        if isinstance(call, ToolReturnPart):
-            self._append_tool_return_part(call, chatbot)
-
-    async def _stream_assistant_text(self, result, chatbot: list[dict]):
-        chatbot.append({'role': 'assistant', 'content': ''})
-        async for message in result.stream_text():
-            chatbot[-1]['content'] = message
-            yield self._build_update(chatbot)
-
     async def stream_from_agent(self, prompt: str, chatbot: list[dict], past_messages: list):
         chatbot.append({'role': 'user', 'content': prompt})
         yield gr.Textbox(interactive=False, value=''), chatbot, gr.skip()
-        async with self.agent.run_stream(
+
+        assistant_message_idx: int | None = None
+        thinking_message_idx_by_part: dict[int, int] = {}
+        final_messages = past_messages
+
+        def ensure_assistant_message() -> int:
+            nonlocal assistant_message_idx
+            if assistant_message_idx is None:
+                chatbot.append({'role': 'assistant', 'content': ''})
+                assistant_message_idx = len(chatbot) - 1
+            return assistant_message_idx
+
+        async with self.agent.run_stream_events(
                 prompt, deps=self.deps, message_history=past_messages
-        ) as result:
-            for message in result.new_messages():
-                for call in message.parts:
-                    self._process_message_part(call, chatbot)
+        ) as stream:
+            async for event in stream:
+                if isinstance(event, PartStartEvent):
+                    if isinstance(event.part, TextPart):
+                        message_idx = ensure_assistant_message()
+                        chatbot[message_idx]['content'] += event.part.content
+                        yield self._build_update(chatbot)
+                    elif isinstance(event.part, ThinkingPart):
+                        self._append_thinking_part(event.part, chatbot)
+                        thinking_message_idx_by_part[event.index] = len(chatbot) - 1
+                        yield self._build_update(chatbot)
+
+                elif isinstance(event, PartDeltaEvent):
+                    if isinstance(event.delta, TextPartDelta):
+                        message_idx = ensure_assistant_message()
+                        chatbot[message_idx]['content'] += event.delta.content_delta
+                        yield self._build_update(chatbot)
+                    elif isinstance(event.delta, ThinkingPartDelta):
+                        message_idx = thinking_message_idx_by_part.get(event.index)
+                        if message_idx is None:
+                            chatbot.append(
+                                {
+                                    'role': 'assistant',
+                                    'content': '',
+                                    'metadata': {'title': '🧠️ Thinking:'},
+                                }
+                            )
+                            message_idx = len(chatbot) - 1
+                            thinking_message_idx_by_part[event.index] = message_idx
+
+                        if event.delta.content_delta:
+                            chatbot[message_idx]['content'] += event.delta.content_delta
+                            yield self._build_update(chatbot)
+
+                elif isinstance(event, FunctionToolCallEvent):
+                    self._append_tool_call_part(event.part, chatbot)
                     yield self._build_update(chatbot)
 
-            async for update in self._stream_assistant_text(result, chatbot):
-                yield update
+                elif isinstance(event, FunctionToolResultEvent):
+                    if isinstance(event.part, ToolReturnPart):
+                        self._append_tool_return_part(event.part, chatbot)
+                        yield self._build_update(chatbot)
 
-            yield gr.Textbox(interactive=True), gr.skip(), result.all_messages()
+                elif isinstance(event, AgentRunResultEvent):
+                    final_messages = event.result.all_messages()
+
+        yield gr.Textbox(interactive=True), gr.skip(), final_messages
 
     async def handle_retry(self, chatbot, past_messages: list, retry_data: gr.RetryData):
         new_history = chatbot[: retry_data.index]
