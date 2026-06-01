@@ -22,19 +22,8 @@ from pydantic_ai import (
 
 class GradioUI:
     FULLSCREEN_CSS = '''
-    html, body {
-        margin: 0;
-        height: 100%;
-    }
-    .gradio-container {
-        max-width: 100% !important;
-        width: 100% !important;
-        margin: 0 !important;
-        padding: 0 12px 12px !important;
-        height: 100vh !important;
-    }
     #chatbot {
-        height: calc(100vh - 110px) !important;
+        height: calc(100vh - 200px) !important;
     }
     '''
 
@@ -42,7 +31,8 @@ class GradioUI:
         self.agent = agent
         self.deps = deps
         self.input_examples = [
-            ExampleMessage(text='What is the weather like in New York City?'),
+            ExampleMessage(text='北京的天气怎么样？'),
+            ExampleMessage(text='上海天气如何？'),
         ]
         self.demo = self.build_demo()
 
@@ -118,53 +108,58 @@ class GradioUI:
                 assistant_message_idx = len(chatbot) - 1
             return assistant_message_idx
 
-        async with self.agent.run_stream_events(
-                prompt, deps=self.deps, message_history=past_messages
-        ) as events:
-            async for event in events:
-                if isinstance(event, PartStartEvent):
-                    if isinstance(event.part, TextPart):
-                        message_idx = ensure_assistant_message()
-                        chatbot[message_idx]['content'] += event.part.content
-                        yield self._build_update(chatbot)
-                    elif isinstance(event.part, ThinkingPart):
-                        self._append_thinking_part(event.part, chatbot)
-                        thinking_message_idx_by_part[event.index] = len(chatbot) - 1
-                        yield self._build_update(chatbot)
-
-                elif isinstance(event, PartDeltaEvent):
-                    if isinstance(event.delta, TextPartDelta):
-                        message_idx = ensure_assistant_message()
-                        chatbot[message_idx]['content'] += event.delta.content_delta
-                        yield self._build_update(chatbot)
-                    elif isinstance(event.delta, ThinkingPartDelta):
-                        message_idx = thinking_message_idx_by_part.get(event.index)
-                        if message_idx is None:
-                            chatbot.append(
-                                {
-                                    'role': 'assistant',
-                                    'content': '',
-                                    'metadata': {'title': '🧠️ Thinking:'},
-                                }
-                            )
-                            message_idx = len(chatbot) - 1
-                            thinking_message_idx_by_part[event.index] = message_idx
-
-                        if event.delta.content_delta:
-                            chatbot[message_idx]['content'] += event.delta.content_delta
+        try:
+            async with self.agent.run_stream_events(
+                    prompt, deps=self.deps, message_history=past_messages
+            ) as events:
+                async for event in events:
+                    if isinstance(event, PartStartEvent):
+                        if isinstance(event.part, TextPart):
+                            message_idx = ensure_assistant_message()
+                            chatbot[message_idx]['content'] += event.part.content
+                            yield self._build_update(chatbot)
+                        elif isinstance(event.part, ThinkingPart):
+                            self._append_thinking_part(event.part, chatbot)
+                            thinking_message_idx_by_part[event.index] = len(chatbot) - 1
                             yield self._build_update(chatbot)
 
-                elif isinstance(event, FunctionToolCallEvent):
-                    self._append_tool_call_part(event.part, chatbot)
-                    yield self._build_update(chatbot)
+                    elif isinstance(event, PartDeltaEvent):
+                        if isinstance(event.delta, TextPartDelta):
+                            message_idx = ensure_assistant_message()
+                            chatbot[message_idx]['content'] += event.delta.content_delta
+                            yield self._build_update(chatbot)
+                        elif isinstance(event.delta, ThinkingPartDelta):
+                            message_idx = thinking_message_idx_by_part.get(event.index)
+                            if message_idx is None:
+                                chatbot.append(
+                                    {
+                                        'role': 'assistant',
+                                        'content': '',
+                                        'metadata': {'title': '🧠️ Thinking:'},
+                                    }
+                                )
+                                message_idx = len(chatbot) - 1
+                                thinking_message_idx_by_part[event.index] = message_idx
 
-                elif isinstance(event, FunctionToolResultEvent):
-                    if isinstance(event.part, ToolReturnPart):
-                        self._append_tool_return_part(event.part, chatbot)
+                            if event.delta.content_delta:
+                                chatbot[message_idx]['content'] += event.delta.content_delta
+                                yield self._build_update(chatbot)
+
+                    elif isinstance(event, FunctionToolCallEvent):
+                        self._append_tool_call_part(event.part, chatbot)
                         yield self._build_update(chatbot)
 
-                elif isinstance(event, AgentRunResultEvent):
-                    final_messages = event.result.all_messages()
+                    elif isinstance(event, FunctionToolResultEvent):
+                        if isinstance(event.part, ToolReturnPart):
+                            self._append_tool_return_part(event.part, chatbot)
+                            yield self._build_update(chatbot)
+
+                    elif isinstance(event, AgentRunResultEvent):
+                        final_messages = event.result.all_messages()
+        except Exception as exc:
+            error_text = str(exc).strip() or exc.__class__.__name__
+            chatbot.append({'role': 'assistant', 'content': f'⚠️ 处理请求时出错：{error_text}'})
+            yield self._build_update(chatbot)
 
         yield gr.Textbox(interactive=True), gr.skip(), final_messages
 
@@ -184,20 +179,41 @@ class GradioUI:
     def select_data(message: gr.SelectData) -> str:
         return message.value['text']
 
+    @staticmethod
+    def get_user(request: gr.Request):
+        return f"当前用户：{request.username}"
+
+    @staticmethod
+    def show_messages(messages: list):
+        return json.dumps(messages, ensure_ascii=False, indent=2)
+
     def build_demo(self):
         with gr.Blocks(fill_height=True) as demo:
             past_messages = gr.State([])
-            chatbot = gr.Chatbot(
-                label='Helpful Assistant',
-                avatar_images=(None, Path('./avator/bot.png')),
-                examples=self.input_examples,
-                elem_id='chatbot',
+            user_info = gr.Markdown()
+            demo.load(
+                self.get_user,
+                outputs=user_info
             )
+
             with gr.Row():
-                prompt = gr.Textbox(
-                    lines=1,
-                    show_label=False,
-                )
+                with gr.Column():
+                    chatbot = gr.Chatbot(
+                        label='Helpful Assistant',
+                        avatar_images=(None, Path('./avator/bot.png')),
+                        examples=self.input_examples,
+                        elem_id='chatbot',
+                    )
+                    prompt = gr.Textbox(
+                        lines=1,
+                        show_label=False,
+                    )
+                with gr.Column():
+                    show_message = gr.Textbox(interactive=False)
+                    debug = gr.Button(
+                        value='查看消息记录',
+                    )
+
             prompt.submit(
                 self.stream_from_agent,
                 inputs=[prompt, chatbot, past_messages],
@@ -208,5 +224,10 @@ class GradioUI:
                 self.handle_retry, [chatbot, past_messages], [prompt, chatbot, past_messages]
             )
             chatbot.undo(self.undo, [chatbot, past_messages], [prompt, chatbot, past_messages])
+            debug.click(
+                self.show_messages,
+                inputs=chatbot,
+                outputs=show_message,
+            )
 
         return demo
