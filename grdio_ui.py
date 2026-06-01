@@ -25,6 +25,9 @@ class GradioUI:
     #chatbot {
         height: calc(100vh - 200px) !important;
     }
+    #debug_show {
+        height: calc(100vh - 200px) !important;
+    }
     '''
 
     def __init__(self, agent: Agent, deps):
@@ -209,7 +212,7 @@ class GradioUI:
                         show_label=False,
                     )
                 with gr.Column():
-                    show_message = gr.Textbox(interactive=False)
+                    show_message = gr.Textbox(interactive=False, elem_id='debug_show')
                     debug = gr.Button(
                         value='查看消息记录',
                     )
